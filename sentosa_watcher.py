@@ -56,11 +56,18 @@ RUN_MODE = os.environ.get("RUN_MODE", "loop").lower()
 #  или заблокировал. Это не ломает остальные: каждый сайт обрабатывается отдельно.
 # ============================================================
 SOURCES = {
-    "PropertyGuru": "https://www.propertyguru.com.sg/property-for-rent?market=residential&listing_type=rent&district_code[]=SENTOSA&bedrooms[]=4&minprice={pmin}&maxprice={pmax}&freetext=Sentosa+Cove",
-    "99.co":        "https://www.99.co/singapore/rent/property?query_ids=dtdistrict4&query_type=district&main_category=residential&rental_type=unit&num_beds=4&price_min={pmin}&price_max={pmax}",
-    "SRX":          "https://www.srx.com.sg/rent/search?propertyTypeGroup=Non-Landed&districtIds=04&minBeds=4&maxBeds=4&minPrice={pmin}&maxPrice={pmax}",
-    "SingaporeExpats": "https://property.singaporeexpats.com/search?type=rent&bedrooms=4&min_price={pmin}&max_price={pmax}&keyword=Sentosa",
+    # Реальные рабочие страницы аренды по Сентозе (проверены).
+    # Фильтр по цене и числу спален применяется в КОДЕ ниже, поэтому в URL
+    # достаточно общей страницы района — так надёжнее, чем хрупкие фильтры в ссылке.
+    "PropertyGuru":    "https://www.propertyguru.com.sg/property-for-rent/at-sentosa-cove-918",
+    "99.co":           "https://www.99.co/singapore/rent/condos-apartments/sentosa",
+    "SRX":             "https://www.srx.com.sg/rent",
+    "SingaporeExpats": "https://property.singaporeexpats.com/search?type=rent&keyword=Sentosa+Cove",
 }
+
+# Фильтр по числу спален. Так как страницы общие (не только 4BR),
+# отсеиваем по тексту карточки: должно быть "4 bed"/"4 bedroom" и НЕ "3"/"5" вперемешку.
+MIN_BEDROOMS = 4
 
 STATE_FILE = Path(__file__).parent / "seen_listings.json"
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -125,6 +132,19 @@ def send_telegram(text: str, buttons: list | None = None):
             log(f"⚠️  Telegram вернул {r.status_code}: {r.text[:200]}")
     except Exception as e:
         log(f"⚠️  Не удалось отправить в Telegram: {e}")
+
+
+def parse_bedrooms(text: str):
+    """Пытается определить число спален из текста карточки.
+    Возвращает int или None. Ищет '4 bed', '4 bedroom', '4 br' и т.п."""
+    if not text:
+        return None
+    t = text.lower()
+    # Явный паттерн "N bed" / "N bedroom" / "N br"
+    m = re.search(r"(\d+)\s*(?:bed|bedroom|br\b)", t)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def parse_price(text: str):
@@ -238,6 +258,13 @@ async def fetch_listings(page, site: str, url: str):
             if not (PRICE_MIN <= price <= PRICE_MAX):
                 continue
 
+            # Фильтр по спальням: нужно ровно/минимум MIN_BEDROOMS.
+            # Если число спален не удалось определить — НЕ отбрасываем (лучше лишнее
+            # уведомление, чем пропуск), но помечаем.
+            beds = parse_bedrooms(card_text)
+            if beds is not None and beds < MIN_BEDROOMS:
+                continue
+
             full_url = href if href.startswith("http") else f"{domain}{href}"
             seen_ids_local.add(listing_id)
             results.append({
@@ -260,7 +287,11 @@ async def check_all():
                                          viewport={"width": 1366, "height": 900})
         page = await ctx.new_page()
         for site, url_tpl in SOURCES.items():
-            url = url_tpl.format(pmin=PRICE_MIN, pmax=PRICE_MAX)
+            # Подставляем цены только если в URL есть плейсхолдеры
+            if "{pmin}" in url_tpl or "{pmax}" in url_tpl:
+                url = url_tpl.format(pmin=PRICE_MIN, pmax=PRICE_MAX)
+            else:
+                url = url_tpl
             log(f"  Проверяю сайт: {site}")
             listings = await fetch_listings(page, site, url)
             log(f"    {site}: найдено в диапазоне — {len(listings)}")
